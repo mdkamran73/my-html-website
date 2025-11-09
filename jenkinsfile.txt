@@ -1,0 +1,66 @@
+pipeline {
+    agent any
+
+    environment {
+        // Change these to your own
+        DOCKERHUB_CREDS = credentials('dockerhub-credentials')   // id in Jenkins
+        IMAGE_NAME     = 'your-dockerhub-username/html-app'
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+        KUBECONFIG     = credentials('kubeconfig')               // file credential
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                sh 'npm ci'
+                sh 'npm run start & sleep 5 && curl -f http://localhost:3000 || exit 1'
+                sh 'pkill node || true'
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest"
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                sh 'echo $DOCKERHUB_CREDS_PSW | docker login -u $DOCKERHUB_CREDS_USR --password-stdin'
+                sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                sh "docker push ${IMAGE_NAME}:latest"
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    // Write kubeconfig to a temp file
+                    writeFile file: 'kubeconfig.tmp', text: env.KUBECONFIG
+                    sh '''
+                        export KUBECONFIG=$(pwd)/kubeconfig.tmp
+                        kubectl apply -f k8s/deployment.yaml
+                        kubectl apply -f k8s/service.yaml
+                        # Rollout with the new image
+                        kubectl set image deployment/html-app html-app=${IMAGE_NAME}:${IMAGE_TAG} --record
+                        kubectl rollout status deployment/html-app
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker logout || true'
+ Jen            sh 'rm -f kubeconfig.tmp'
+        }
+    }
+}
